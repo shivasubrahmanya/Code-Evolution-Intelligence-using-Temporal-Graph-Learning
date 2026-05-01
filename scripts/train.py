@@ -271,6 +271,11 @@ def run(args) -> None:
 
     # -- Loss functions --------------------------------
     class_weights = load_label_weights(train_path).to(DEVICE)
+    # AGGRESSIVE MODE: Boost punishment for missing minority classes (ADD=0, DELETE=1)
+    class_weights[0] *= 2.0
+    class_weights[1] *= 2.0
+    print(f"  Aggressive Class Weights: {class_weights.tolist()}")
+
     loss_change   = nn.CrossEntropyLoss(weight=class_weights)
     loss_bug      = nn.BCEWithLogitsLoss()
 
@@ -324,12 +329,12 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train the Code Evolution model.")
     p.add_argument("--epochs",      type=int,   default=20)
     p.add_argument("--batch-size",  type=int,   default=16)
-    p.add_argument("--lr",          type=float, default=1e-3)
-    p.add_argument("--hidden-dim",  type=int,   default=128)
+    p.add_argument("--lr",          type=float, default=2e-3)
+    p.add_argument("--hidden-dim",  type=int,   default=64)
     p.add_argument("--embed-dim",   type=int,   default=64)
     p.add_argument("--num-heads",   type=int,   default=4)
     p.add_argument("--num-layers",  type=int,   default=2)
-    p.add_argument("--dropout",     type=float, default=0.3)
+    p.add_argument("--dropout",     type=float, default=0.1)
     p.add_argument("--output-dir",  default=str(ROOT / "outputs" / "checkpoints"))
     return p.parse_args()
 
