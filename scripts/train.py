@@ -327,14 +327,14 @@ def run(args) -> None:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train the Code Evolution model.")
-    p.add_argument("--epochs",      type=int,   default=20)
-    p.add_argument("--batch-size",  type=int,   default=16)
-    p.add_argument("--lr",          type=float, default=2e-3)
-    p.add_argument("--hidden-dim",  type=int,   default=64)
+    p.add_argument("--epochs",      type=int,   default=50)
+    p.add_argument("--batch-size",  type=int,   default=32)
+    p.add_argument("--lr",          type=float, default=5e-4)
+    p.add_argument("--hidden-dim",  type=int,   default=256)
     p.add_argument("--embed-dim",   type=int,   default=64)
-    p.add_argument("--num-heads",   type=int,   default=4)
-    p.add_argument("--num-layers",  type=int,   default=2)
-    p.add_argument("--dropout",     type=float, default=0.1)
+    p.add_argument("--num-heads",   type=int,   default=8)
+    p.add_argument("--num-layers",  type=int,   default=4)
+    p.add_argument("--dropout",     type=float, default=0.2)
     p.add_argument("--output-dir",  default=str(ROOT / "outputs" / "checkpoints"))
     return p.parse_args()
 
