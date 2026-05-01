@@ -1,0 +1,37 @@
+# configs/config.yaml
+# Central configuration for the Code Evolution ML pipeline.
+# Edit these values to tune the pipeline without touching source code.
+
+data:
+  raw_dir:        data/raw
+  processed_dir:  data/processed
+  sequences_dir:  data/sequences
+  max_files:      20          # max changed files per commit
+  min_lines:      3           # min lines of code to keep a file
+  window_size:    3           # temporal context window
+  train_frac:     0.70
+  val_frac:       0.15
+  # test_frac = 1 - train_frac - val_frac = 0.15
+
+model:
+  vocab_size:     512         # overridden by actual vocab.json at runtime
+  hidden_dim:     128
+  embed_dim:      64
+  num_heads:      4
+  num_tf_layers:  2
+  dropout:        0.3
+
+training:
+  lr:             0.001
+  batch_size:     16
+  epochs:         20
+  output_dir:     outputs/checkpoints
+  clip_grad:      1.0
+
+evaluation:
+  checkpoint:     outputs/checkpoints/best_model.pt
+  output_dir:     outputs/results
+
+app:
+  checkpoint:     outputs/checkpoints/best_model.pt
+  port:           8501
