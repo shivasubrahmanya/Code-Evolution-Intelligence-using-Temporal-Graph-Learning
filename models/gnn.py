@@ -60,6 +60,7 @@ class GraphEncoder(nn.Module):
         self.embedding  = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.conv1      = GCNConv(embed_dim,  hidden_dim)
         self.conv2      = GCNConv(hidden_dim, hidden_dim)
+        self.conv3      = GCNConv(hidden_dim, hidden_dim)
         self.dropout    = nn.Dropout(dropout)
         self.proj       = nn.Linear(hidden_dim, hidden_dim)
         self.hidden_dim = hidden_dim
@@ -82,6 +83,10 @@ class GraphEncoder(nn.Module):
         h = self.dropout(h)
 
         h = self.conv2(h, edge_index)       # [N, hidden_dim]
+        h = F.relu(h)
+        h = self.dropout(h)
+
+        h = self.conv3(h, edge_index)       # [N, hidden_dim]
         h = F.relu(h)
         h = self.dropout(h)
 
