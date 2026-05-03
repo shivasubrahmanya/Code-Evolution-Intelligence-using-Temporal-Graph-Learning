@@ -36,11 +36,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch_geometric.data import Batch
 
 from models.multitask_model import CodeEvolutionModel, CHANGE_LABELS
-from utils.data_utils        import CodeSequenceDataset, load_label_weights
+from utils.data_utils        import CodeSequenceDataset, BinaryCodeSequenceDataset, load_label_weights
 from utils.graph_utils       import dict_to_pyg
 
 # Project root - works regardless of CWD
@@ -55,35 +55,30 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def encode_sequence_batch(
-    batch_raw_inputs: list[list[dict]],    # [B, W] list of graph dicts
+    batch_inputs: list[list[dict | Data]],    # [B, W] list of graph dicts OR Data objects
     gnn: nn.Module,
     use_after: bool = True,
 ) -> torch.Tensor:
     """
-    Convert a batch of raw graph sequences -> tensor [B, W, D].
-
-    Parameters
-    ----------
-    batch_raw_inputs : list (len B) of lists (len W) of graph dicts
-    gnn              : GraphEncoder model
-    use_after        : if True use graph_after key, else graph_before
-
-    Returns
-    -------
-    torch.Tensor  [B, W, D]
+    Convert a batch of graph sequences -> tensor [B, W, D].
+    Supports both raw dicts (slow) and pre-converted Data objects (fast).
     """
-    key = "graph_after" if use_after else "graph_before"
-    B   = len(batch_raw_inputs)
-    W   = len(batch_raw_inputs[0])
+    B   = len(batch_inputs)
+    W   = len(batch_inputs[0])
 
     all_embeddings = []
 
     for w in range(W):
         # Collect all graphs at position w across the batch
-        graphs = [
-            dict_to_pyg(batch_raw_inputs[b][w].get(key, {"nodes": [], "edges": []}))
-            for b in range(B)
-        ]
+        graphs = []
+        for b in range(B):
+            item = batch_inputs[b][w]
+            if isinstance(item, dict):
+                key = "graph_after" if use_after else "graph_before"
+                graphs.append(dict_to_pyg(item.get(key, {"nodes": [], "edges": []})))
+            else:
+                graphs.append(item)
+        
         pyg_batch = Batch.from_data_list(graphs).to(DEVICE)
 
         with torch.no_grad() if not gnn.training else torch.enable_grad():
@@ -95,10 +90,11 @@ def encode_sequence_batch(
 
 
 def custom_collate(batch: list[dict]) -> dict:
-    """Custom collate that keeps raw graph dicts as lists."""
+    """Custom collate that handles both 'raw_input' and 'input' keys."""
+    # Use 'input' if available (binary), else 'raw_input' (json)
+    input_key = "input" if "input" in batch[0] else "raw_input"
     return {
-        "raw_input":    [item["raw_input"]    for item in batch],
-        "raw_target":   [item["raw_target"]   for item in batch],
+        "input":        [item[input_key]      for item in batch],
         "change_label": torch.stack([item["change_label"] for item in batch]),
         "bug_label":    torch.stack([item["bug_label"]     for item in batch]),
     }
@@ -144,11 +140,11 @@ def train_epoch(
     n_batches    = 0
 
     for batch in loader:
-        raw_inputs    = batch["raw_input"]     # list[list[dict]]
+        input_data    = batch["input"]
         change_labels = batch["change_label"].to(DEVICE)
         bug_labels    = batch["bug_label"].to(DEVICE)
 
-        seq_emb = encode_sequence_batch(raw_inputs, model.gnn)  # [B, W, D]
+        seq_emb = encode_sequence_batch(input_data, model.gnn)  # [B, W, D]
 
         change_logits, bug_logit = model(seq_emb)
 
@@ -190,11 +186,11 @@ def eval_epoch(
     n_batches    = 0
 
     for batch in loader:
-        raw_inputs    = batch["raw_input"]
+        input_data    = batch["input"]
         change_labels = batch["change_label"].to(DEVICE)
         bug_labels    = batch["bug_label"].to(DEVICE)
 
-        seq_emb = encode_sequence_batch(raw_inputs, model.gnn)
+        seq_emb = encode_sequence_batch(input_data, model.gnn)
 
         change_logits, bug_logit = model(seq_emb)
 
@@ -240,15 +236,49 @@ def run(args) -> None:
     print(f"  Vocab size  : {vocab_size}")
 
     # -- Datasets --------------------------------------
-    train_path = ROOT / "data" / "sequences" / "train_sequences.json"
-    val_path   = ROOT / "data" / "sequences" / "val_sequences.json"
+    train_json = ROOT / "data" / "sequences" / "train_sequences.json"
+    val_json   = ROOT / "data" / "sequences" / "val_sequences.json"
+    train_pt   = ROOT / "data" / "sequences" / "train_sequences.pt"
+    val_pt     = ROOT / "data" / "sequences" / "val_sequences.pt"
 
-    train_ds = CodeSequenceDataset(train_path)
-    val_ds   = CodeSequenceDataset(val_path)
+    if train_pt.exists() and not args.force_json:
+        train_ds = BinaryCodeSequenceDataset(train_pt)
+        val_ds   = BinaryCodeSequenceDataset(val_pt)
+        use_binary = True
+    else:
+        print("  [WARN] Using slow JSON streaming. Run scripts/binarize_data.py for 10x speed.")
+        train_ds = CodeSequenceDataset(train_json)
+        val_ds   = CodeSequenceDataset(val_json)
+        use_binary = False
+
+    # -- Sampler for balancing -------------------------
+    sampler = None
+    if use_binary:
+        print("  Creating WeightedRandomSampler for class balancing...")
+        # Access the raw labels from the binary data
+        labels = torch.stack([item["change_label"] for item in train_ds.data])
+        class_counts = torch.bincount(labels)
+        
+        # Weight is inverse frequency
+        class_weights = 1. / (class_counts.float() + 1e-6)
+        sample_weights = class_weights[labels]
+        
+        sampler = WeightedRandomSampler(
+            weights=sample_weights, 
+            num_samples=len(sample_weights), 
+            replacement=True
+        )
+        
+        print(f"  Class counts: {class_counts.tolist()}")
+        print(f"  Class weights: {[round(w, 4) for w in class_weights.tolist()]}")
 
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=custom_collate, num_workers=0,
+        train_ds, 
+        batch_size=args.batch_size, 
+        sampler=sampler,
+        shuffle=(sampler is None and use_binary),
+        collate_fn=custom_collate, 
+        num_workers=0,
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
@@ -270,14 +300,34 @@ def run(args) -> None:
     print(f"  Trainable params: {total_params:,}")
 
     # -- Loss functions --------------------------------
-    class_weights = load_label_weights(train_path).to(DEVICE)
-    # AGGRESSIVE MODE: Boost punishment for missing minority classes (ADD=0, DELETE=1)
-    class_weights[0] *= 2.0
-    class_weights[1] *= 2.0
-    print(f"  Aggressive Class Weights: {class_weights.tolist()}")
+    if use_binary:
+        # Binary dataset allows fast inverse-frequency calculation
+        bug_labels = torch.stack([item["bug_label"] for item in train_ds.data])
+        num_pos = bug_labels.sum().item()
+        num_neg = len(bug_labels) - num_pos
+        pos_weight = torch.tensor([num_neg / (num_pos + 1e-6)]).to(DEVICE)
+        print(f"  Calculated bug pos_weight: {pos_weight.item():.4f}")
+        
+        import math
+        prior_prob = num_pos / len(bug_labels)
+        init_bias = math.log(prior_prob / (1 - prior_prob + 1e-6))
+        model.bug_head[-1].bias.data.fill_(init_bias)
+        print(f"  Initialized bug head bias to: {init_bias:.4f}")
 
-    loss_change   = nn.CrossEntropyLoss(weight=class_weights)
-    loss_bug      = nn.BCEWithLogitsLoss()
+        
+        # Calculate change label weights from binary data
+        change_labels = torch.stack([item["change_label"] for item in train_ds.data])
+        counts = torch.bincount(change_labels, minlength=3)
+        total = len(change_labels)
+        class_weights = (total / (3.0 * counts + 1e-6)).to(DEVICE)
+    else:
+        pos_weight = torch.tensor([3.0]).to(DEVICE) # Fallback
+        class_weights = load_label_weights(train_json).to(DEVICE)
+
+    print(f"  Label weights: {class_weights.tolist()}")
+
+    loss_change = nn.CrossEntropyLoss(weight=class_weights)
+    loss_bug    = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     # -- Optimizer & Scheduler -------------------------
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -285,7 +335,7 @@ def run(args) -> None:
 
     # -- Training loop --------------------------------
     history    = []
-    best_val   = float("inf")
+    best_score = 0.0
     best_epoch = 0
 
     for epoch in range(1, args.epochs + 1):
@@ -306,17 +356,20 @@ def run(args) -> None:
         record = {"epoch": epoch, "train": tr, "val": va}
         history.append(record)
 
-        if va["loss"] < best_val:
-            best_val   = va["loss"]
+        # Save best model based on a balance of Change Acc and Bug F1
+        score = va["change_acc"] + va["bug_f1"]
+        if score > best_score:
+            best_score = score
             best_epoch = epoch
             torch.save(model.state_dict(), out_dir / "best_model.pt")
+            print(f"  [NEW BEST] Score: {score:.4f}")
 
     # -- Save checkpoint & history ---------------------
     torch.save(model.state_dict(), out_dir / "final_model.pt")
     with open(out_dir / "train_history.json", "w") as f:
         json.dump(history, f, indent=2)
 
-    print(f"\n  Best epoch  : {best_epoch}  (val loss={best_val:.4f})")
+    print(f"\n  Best epoch  : {best_epoch}  (score={best_score:.4f})")
     print(f"  Saved to    : {out_dir}")
     print(f"\n  [OK]  Training complete.\n")
 
@@ -333,9 +386,10 @@ def parse_args():
     p.add_argument("--hidden-dim",  type=int,   default=256)
     p.add_argument("--embed-dim",   type=int,   default=256)
     p.add_argument("--num-heads",   type=int,   default=8)
-    p.add_argument("--num-layers",  type=int,   default=4)
+    p.add_argument("--num-layers",  type=int,   default=2)
     p.add_argument("--dropout",     type=float, default=0.2)
     p.add_argument("--output-dir",  default=str(ROOT / "outputs" / "checkpoints"))
+    p.add_argument("--force-json",  action="store_true", help="Force slow JSON loading")
     return p.parse_args()
 
 

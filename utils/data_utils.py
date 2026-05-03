@@ -11,6 +11,10 @@ Each item:
   - change_label : int
   - bug_label    : int
   - raw_input    : list of graph dicts (for on-the-fly GNN encoding)
+
+BinaryCodeSequenceDataset
+-------------------------
+Loads pre-processed .pt files for maximum speed.
 """
 
 from __future__ import annotations
@@ -137,3 +141,23 @@ def load_label_weights(train_json: str | Path) -> torch.Tensor:
             weights[cls] = 1.0  # fallback
             
     return weights
+
+
+class BinaryCodeSequenceDataset(Dataset):
+    """
+    Fast dataset that loads pre-binarized .pt files.
+    """
+    def __init__(self, pt_path: str | Path):
+        self.pt_path = Path(pt_path)
+        if not self.pt_path.exists():
+            raise FileNotFoundError(f"Binary data not found at {pt_path}")
+        
+        print(f"  Loading binary data from {self.pt_path.name}...")
+        self.data = torch.load(self.pt_path)
+        print(f"  Loaded {len(self.data):,} items.")
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self.data[idx]

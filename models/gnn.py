@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from torch_geometric.nn import GCNConv, global_mean_pool
+    from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool
     TG_OK = True
 except ImportError:
     TG_OK = False
@@ -62,7 +62,9 @@ class GraphEncoder(nn.Module):
         self.conv2      = GCNConv(hidden_dim, hidden_dim)
         self.conv3      = GCNConv(hidden_dim, hidden_dim)
         self.dropout    = nn.Dropout(dropout)
-        self.proj       = nn.Linear(hidden_dim, hidden_dim)
+        
+        # We concat mean and max pool, so the input is hidden_dim * 2
+        self.proj       = nn.Linear(hidden_dim * 2, hidden_dim)
         self.hidden_dim = hidden_dim
 
     def forward(
@@ -76,23 +78,29 @@ class GraphEncoder(nn.Module):
         -------
         torch.Tensor  shape [B, hidden_dim]
         """
-        h = self.embedding(x)               # [N, embed_dim]
+        h0 = self.embedding(x)              # [N, embed_dim]
 
-        h = self.conv1(h, edge_index)       # [N, hidden_dim]
-        h = F.relu(h)
-        h = self.dropout(h)
+        h1 = self.conv1(h0, edge_index)     # [N, hidden_dim]
+        h1 = F.relu(h1)
+        h1 = self.dropout(h1)
 
-        h = self.conv2(h, edge_index)       # [N, hidden_dim]
-        h = F.relu(h)
-        h = self.dropout(h)
+        h2 = self.conv2(h1, edge_index)     # [N, hidden_dim]
+        h2 = F.relu(h2)
+        h2 = self.dropout(h2)
+        h2 = h2 + h1                        # Residual connection
 
-        h = self.conv3(h, edge_index)       # [N, hidden_dim]
-        h = F.relu(h)
-        h = self.dropout(h)
+        h3 = self.conv3(h2, edge_index)     # [N, hidden_dim]
+        h3 = F.relu(h3)
+        h3 = self.dropout(h3)
+        h3 = h3 + h2                        # Residual connection
 
-        h = global_mean_pool(h, batch)      # [B, hidden_dim]
-        h = self.proj(h)                    # [B, hidden_dim]
-        return h
+        h_mean = global_mean_pool(h3, batch) # [B, hidden_dim]
+        h_max  = global_max_pool(h3, batch)  # [B, hidden_dim]
+        
+        h_pool = torch.cat([h_mean, h_max], dim=-1) # [B, hidden_dim * 2]
+        out    = self.proj(h_pool)                  # [B, hidden_dim]
+        
+        return out
 
 
 # ---------------------------------------------
