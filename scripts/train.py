@@ -315,18 +315,13 @@ def run(args) -> None:
         print(f"  Initialized bug head bias to: {init_bias:.4f}")
 
         
-        # Calculate change label weights from binary data
-        change_labels = torch.stack([item["change_label"] for item in train_ds.data])
-        counts = torch.bincount(change_labels, minlength=3)
-        total = len(change_labels)
-        class_weights = (total / (3.0 * counts + 1e-6)).to(DEVICE)
+        # Note: We NO LONGER use class_weights for CrossEntropyLoss 
+        # because the WeightedRandomSampler handles balancing at the batch level.
+        pass
     else:
         pos_weight = torch.tensor([3.0]).to(DEVICE) # Fallback
-        class_weights = load_label_weights(train_json).to(DEVICE)
 
-    print(f"  Label weights: {class_weights.tolist()}")
-
-    loss_change = nn.CrossEntropyLoss(weight=class_weights)
+    loss_change = nn.CrossEntropyLoss()  # Unweighted because of Sampler
     loss_bug    = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     # -- Optimizer & Scheduler -------------------------
