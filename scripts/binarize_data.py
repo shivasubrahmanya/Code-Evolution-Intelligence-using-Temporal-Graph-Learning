@@ -10,6 +10,7 @@ import torch
 from pathlib import Path
 import sys
 import ijson
+from transformers import AutoTokenizer
 
 # Add project root to path
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +21,7 @@ from models.multitask_model import CHANGE_TO_IDX
 
 def binarize(json_path: Path, output_path: Path):
     print(f"Streaming {json_path}...")
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
     
     binarized = []
     bug_count = 0
@@ -40,7 +42,18 @@ def binarize(json_path: Path, output_path: Path):
             input_graphs = []
             for step in rec.get("input", []):
                 # Use graph_after
-                g = dict_to_pyg(step.get("graph_after", {"nodes": [], "edges": []}))
+                graph_dict = step.get("graph_after", {"nodes": [], "edges": []})
+                g = dict_to_pyg(graph_dict)
+                
+                # NEW: Tokenize node texts
+                node_texts = graph_dict.get("node_texts", [""] * len(graph_dict.get("nodes", [])))
+                if not node_texts:
+                    node_texts = [""] * len(graph_dict.get("nodes", []))
+                
+                tokens = tokenizer(node_texts, padding='max_length', truncation=True, max_length=32, return_tensors='pt')
+                g.node_tokens = tokens['input_ids']
+                g.node_mask   = tokens['attention_mask']
+                
                 input_graphs.append(g)
                 
             # 2. Convert labels
@@ -78,5 +91,11 @@ if __name__ == "__main__":
     # Process Train (25GB)
     train_json = data_dir / "train_sequences.json"
     train_pt   = data_dir / "train_sequences.pt"
-    if train_json.exists():
+    if train_json.exists() and not train_pt.exists():
         binarize(train_json, train_pt)
+
+    # Process Test (3GB)
+    test_json = data_dir / "test_sequences.json"
+    test_pt   = data_dir / "test_sequences.pt"
+    if test_json.exists() and not test_pt.exists():
+        binarize(test_json, test_pt)

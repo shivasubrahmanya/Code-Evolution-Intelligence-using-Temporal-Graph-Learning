@@ -27,6 +27,7 @@ def dict_to_pyg(graph_dict: dict) -> Data:
     """
     nodes = graph_dict.get("nodes", [])
     edges = graph_dict.get("edges", [])
+    node_texts = graph_dict.get("node_texts", []) # Capture the code text
 
     x = torch.tensor(nodes, dtype=torch.long)
 
@@ -35,7 +36,7 @@ def dict_to_pyg(graph_dict: dict) -> Data:
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
 
-    return Data(x=x, edge_index=edge_index, num_nodes=len(nodes))
+    return Data(x=x, edge_index=edge_index, num_nodes=len(nodes), node_texts=node_texts)
 
 
 def sequence_to_pyg_list(seq_record: dict, use_after: bool = True) -> list[Data]:

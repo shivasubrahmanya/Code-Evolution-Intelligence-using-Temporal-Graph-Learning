@@ -28,6 +28,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from torch_geometric.data import Batch
+from transformers import AutoTokenizer, AutoModel
 
 from models.gnn      import GraphEncoder
 from models.temporal import TemporalTransformer
@@ -80,6 +81,7 @@ class CodeEvolutionModel(nn.Module):
 
         # -- Prediction heads --------------------------------
         self.change_head = nn.Sequential(
+            nn.BatchNorm1d(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -87,6 +89,7 @@ class CodeEvolutionModel(nn.Module):
         )
 
         self.bug_head = nn.Sequential(
+            nn.BatchNorm1d(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -95,7 +98,10 @@ class CodeEvolutionModel(nn.Module):
 
     def encode_graph(self, graph_batch: Batch) -> torch.Tensor:
         """Encode a PyG Batch of graphs -> [N_graphs, hidden_dim]."""
-        return self.gnn(graph_batch.x, graph_batch.edge_index, graph_batch.batch)
+        node_tokens = getattr(graph_batch, "node_tokens", None)
+        node_mask   = getattr(graph_batch, "node_mask", None)
+        return self.gnn(graph_batch.x, graph_batch.edge_index, graph_batch.batch,
+                        node_tokens=node_tokens, node_mask=node_mask)
 
     def forward(
         self,

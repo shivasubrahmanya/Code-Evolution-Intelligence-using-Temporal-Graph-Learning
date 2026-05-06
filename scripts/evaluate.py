@@ -1,122 +1,140 @@
 """
 scripts/evaluate.py
 ===================
-Phase 7 - Evaluation: Accuracy, Top-3, F1, Confusion Matrix, Baselines.
-
-Usage:
-  python scripts/evaluate.py
-  python scripts/evaluate.py --checkpoint outputs/checkpoints/best_model.pt
+Final Evaluation Script
+- Loads the final model
+- Evaluates on the TEST set
+- Computes Accuracy, F1, and Confusion Matrix
 """
 
-from __future__ import annotations
-
 import json
-import argparse
-from pathlib import Path
-from collections import Counter
-
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
+from pathlib import Path
+import numpy as np
+import sys
+
+# Project root
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(ROOT))
 
 from models.multitask_model import CodeEvolutionModel, CHANGE_LABELS
-from utils.data_utils        import CodeSequenceDataset
-from scripts.train           import encode_sequence_batch, custom_collate, DEVICE
+from utils.data_utils        import BinaryCodeSequenceDataset
 
-# Project root - works regardless of CWD
+# Project root
 ROOT = Path(__file__).resolve().parent.parent
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-def compute_change_metrics(logits, labels):
-    probs = F.softmax(logits, dim=-1)
-    preds = probs.argmax(dim=-1)
-    acc   = (preds == labels).float().mean().item()
-    top3  = probs.topk(min(3, probs.size(-1)), dim=-1).indices
-    top3_acc = sum(
-        labels[i].item() in top3[i].tolist() for i in range(len(labels))
-    ) / len(labels)
-    n = probs.size(-1)
-    cm = torch.zeros(n, n, dtype=torch.long)
-    for t, p in zip(labels.tolist(), preds.tolist()):
-        cm[t][p] += 1
-    return {"accuracy": acc, "top3_accuracy": top3_acc, "confusion_matrix": cm.tolist()}
-
-
-def compute_bug_metrics(logits, labels):
-    preds = (torch.sigmoid(logits) > 0.5).float()
-    labels = labels.float()
-    tp = (preds * labels).sum().item()
-    fp = (preds * (1 - labels)).sum().item()
-    fn = ((1 - preds) * labels).sum().item()
-    tn = ((1 - preds) * (1 - labels)).sum().item()
-    precision = tp / (tp + fp + 1e-8)
-    recall    = tp / (tp + fn + 1e-8)
-    f1        = 2 * precision * recall / (precision + recall + 1e-8)
+def custom_collate(batch: list[dict]) -> dict:
     return {
-        "precision": precision, "recall": recall, "f1": f1,
-        "accuracy": (tp + tn) / (tp + tn + fp + fn + 1e-8),
-        "confusion_matrix": [[int(tn), int(fp)], [int(fn), int(tp)]],
+        "input":        [item["input"]      for item in batch],
+        "change_label": torch.stack([item["change_label"] for item in batch]),
+        "bug_label":    torch.stack([item["bug_label"]     for item in batch]),
     }
 
-
-def baseline_random(labels, n_classes=3):
-    import random
-    preds = [random.randint(0, n_classes - 1) for _ in labels]
-    return sum(p == l for p, l in zip(preds, labels)) / len(labels)
-
-
-def baseline_majority(labels):
-    m = Counter(labels).most_common(1)[0][0]
-    return sum(l == m for l in labels) / len(labels)
-
-
 @torch.no_grad()
-def run_inference(model, loader):
+def evaluate(model, loader):
     model.eval()
-    cl, la, bl, lb = [], [], [], []
-    for batch in loader:
-        seq = encode_sequence_batch(batch["raw_input"], model.gnn)
-        c_l, b_l = model(seq)
-        cl.append(c_l.cpu()); la.append(batch["change_label"])
-        bl.append(b_l.squeeze(-1).cpu()); lb.append(batch["bug_label"])
-    return torch.cat(cl), torch.cat(la), torch.cat(bl), torch.cat(lb)
+    
+    all_change_preds = []
+    all_change_true  = []
+    all_bug_preds    = []
+    all_bug_true     = []
+    
+    print(f"  Evaluating on {len(loader)} batches...")
+    
+    for i, batch in enumerate(loader):
+        if i % 10 == 0:
+            print(f"    Batch {i}/{len(loader)}...")
+            
+        input_data    = batch["input"]
+        change_labels = batch["change_label"].to(DEVICE)
+        bug_labels    = batch["bug_label"].to(DEVICE)
 
+        # Helper from train.py logic (re-implemented here for standalone use)
+        from scripts.train import encode_sequence_batch
+        seq_emb = encode_sequence_batch(input_data, model.gnn)
+        
+        change_logits, bug_logit = model(seq_emb)
+        
+        # Change predictions
+        preds = change_logits.argmax(dim=-1)
+        all_change_preds.extend(preds.cpu().numpy())
+        all_change_true.extend(change_labels.cpu().numpy())
+        
+        # Bug predictions
+        bug_probs = torch.sigmoid(bug_logit.squeeze(-1))
+        all_bug_preds.extend((bug_probs > 0.5).float().cpu().numpy())
+        all_bug_true.extend(bug_labels.cpu().numpy())
+        
+    return (
+        np.array(all_change_true), np.array(all_change_preds),
+        np.array(all_bug_true), np.array(all_bug_preds)
+    )
 
-def run(args):
-    print(f"\n{'='*55}\n  Evaluation  -  {args.checkpoint}\n{'='*55}\n")
+def print_metrics(y_true, y_pred, labels, title):
+    print(f"\n--- {title} ---")
+    acc = (y_true == y_pred).mean()
+    print(f"  Overall Accuracy: {acc:.4f}")
+    
+    # Simple manual Confusion Matrix
+    n_classes = len(labels)
+    cm = np.zeros((n_classes, n_classes), dtype=int)
+    for t, p in zip(y_true, y_pred):
+        cm[int(t), int(p)] += 1
+        
+    print("\n  Confusion Matrix:")
+    header = "True \\ Pred | " + " | ".join([f"{l:7}" for l in labels])
+    print("  " + header)
+    print("  " + "-" * len(header))
+    for i, label in enumerate(labels):
+        row = " | ".join([f"{cm[i, j]:7}" for j in range(n_classes)])
+        print(f"  {label:10} | {row}")
+    
+    # Class-wise F1
+    print("\n  Class-wise Performance:")
+    for i, label in enumerate(labels):
+        tp = cm[i, i]
+        fp = cm[:, i].sum() - tp
+        fn = cm[i, :].sum() - tp
+        prec = tp / (tp + fp + 1e-8)
+        rec  = tp / (tp + fn + 1e-8)
+        f1   = 2 * prec * rec / (prec + rec + 1e-8)
+        print(f"    {label:10}: Precision={prec:.3f}, Recall={rec:.3f}, F1={f1:.3f}")
+
+def run_eval():
+    # 1. Load Model
+    model_path = ROOT / "outputs" / "checkpoints" / "final_model.pt"
+    if not model_path.exists():
+        print(f"Error: Model not found at {model_path}")
+        return
+
+    # Need vocab size to init model
     vocab_path = ROOT / "data" / "processed" / "vocab.json"
-    vocab_size = (len(json.load(open(vocab_path))) + 10) if vocab_path.exists() else 512
+    with open(vocab_path) as f:
+        vocab = json.load(f)
+    vocab_size = len(vocab) + 10
 
-    model = CodeEvolutionModel(vocab_size=vocab_size).to(DEVICE)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=DEVICE))
+    model = CodeEvolutionModel(vocab_size=vocab_size, hidden_dim=256, embed_dim=256, num_heads=8, num_tf_layers=2).to(DEVICE)
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    print(f"  Loaded model from {model_path}")
 
-    test_ds = CodeSequenceDataset(ROOT / "data" / "sequences" / "test_sequences.json")
-    loader  = DataLoader(test_ds, batch_size=32, shuffle=False,
-                         collate_fn=custom_collate, num_workers=0)
+    # 2. Load Test Data
+    test_pt = ROOT / "data" / "sequences" / "test_sequences.pt"
+    if not test_pt.exists():
+        print(f"Error: Test binary data not found at {test_pt}. Run binarization first.")
+        return
+        
+    test_ds = BinaryCodeSequenceDataset(test_pt)
+    test_loader = DataLoader(test_ds, batch_size=32, shuffle=False, collate_fn=custom_collate)
 
-    c_log, c_lab, b_log, b_lab = run_inference(model, loader)
+    # 3. Evaluate
+    y_change_true, y_change_pred, y_bug_true, y_bug_pred = evaluate(model, test_loader)
 
-    cm = compute_change_metrics(c_log, c_lab)
-    bm = compute_bug_metrics(b_log, b_lab)
-    label_list = c_lab.tolist()
-
-    print(f"  [Change]  acc={cm['accuracy']:.4f}  top3={cm['top3_accuracy']:.4f}")
-    print(f"  [Bug]     P={bm['precision']:.3f}  R={bm['recall']:.3f}  F1={bm['f1']:.3f}")
-    print(f"  [Random]  {baseline_random(label_list):.4f}")
-    print(f"  [Majority]{baseline_majority(label_list):.4f}")
-
-    out = Path(args.output_dir); out.mkdir(parents=True, exist_ok=True)
-    with open(out / "eval_results.json", "w") as f:
-        json.dump({"change": cm, "bug": bm}, f, indent=2)
-    print(f"\n  [OK]  Results -> {out}/eval_results.json\n")
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default=str(ROOT / "outputs" / "checkpoints" / "best_model.pt"))
-    p.add_argument("--output-dir", default=str(ROOT / "outputs" / "results"))
-    return p.parse_args()
-
+    # 4. Report
+    print_metrics(y_change_true, y_change_pred, CHANGE_LABELS, "CHANGE DETECTION")
+    print_metrics(y_bug_true, y_bug_pred, ["NO_BUG", "BUG"], "BUG DETECTION")
 
 if __name__ == "__main__":
-    run(parse_args())
+    run_eval()

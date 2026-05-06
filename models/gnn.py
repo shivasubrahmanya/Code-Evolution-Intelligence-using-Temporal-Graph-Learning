@@ -24,6 +24,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import AutoModel
 
 try:
     from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool
@@ -57,28 +58,74 @@ class GraphEncoder(nn.Module):
         dropout:    float = 0.3,
     ):
         super().__init__()
+        # -- Semantic Backbone (CodeBERT) --------------------
+        print("  Loading CodeBERT backbone...")
+        self.codebert = AutoModel.from_pretrained("microsoft/codebert-base")
+        for param in self.codebert.parameters():
+            param.requires_grad = False  # Keep it frozen for speed/memory
+            
+        self.semantic_proj = nn.Linear(768, embed_dim)
+
+        # -- Structural Encoder (GNN) ------------------------
         self.embedding  = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.conv1      = GCNConv(embed_dim,  hidden_dim)
         self.conv2      = GCNConv(hidden_dim, hidden_dim)
         self.conv3      = GCNConv(hidden_dim, hidden_dim)
         self.dropout    = nn.Dropout(dropout)
         
-        # We concat mean and max pool, so the input is hidden_dim * 2
         self.proj       = nn.Linear(hidden_dim * 2, hidden_dim)
         self.hidden_dim = hidden_dim
 
     def forward(
         self,
-        x:          torch.Tensor,   # [N] long - node type IDs
-        edge_index: torch.Tensor,   # [2, E] long - edges
-        batch:      torch.Tensor,   # [N] long - batch assignment
+        x:           torch.Tensor,   # [N] long - node type IDs
+        edge_index:  torch.Tensor,   # [2, E] long - edges
+        batch:       torch.Tensor,   # [N] long - batch assignment
+        node_tokens: torch.Tensor = None, # [N, 32]
+        node_mask:   torch.Tensor = None, # [N, 32]
     ) -> torch.Tensor:
         """
         Returns
         -------
         torch.Tensor  shape [B, hidden_dim]
         """
-        h0 = self.embedding(x)              # [N, embed_dim]
+        # 1. Structural features
+        h_struct = self.embedding(x)              # [N, embed_dim]
+        
+        # 2. Semantic features (CodeBERT)
+        if node_tokens is not None:
+            # SAFETY: If there are too many nodes, we must process in chunks to avoid 14GB OOM
+            MAX_SEM_NODES = 1000 # Safety cap for CodeBERT
+            num_nodes = node_tokens.size(0)
+            
+            if num_nodes > MAX_SEM_NODES:
+                # Only take the first MAX_SEM_NODES to stay within 6GB VRAM
+                node_tokens = node_tokens[:MAX_SEM_NODES]
+                node_mask   = node_mask[:MAX_SEM_NODES]
+                # We'll need to pad h_sem back to the original N later
+            
+            with torch.no_grad():
+                # Process in small mini-chunks of 128 nodes to stay safe
+                chunk_size = 128
+                sem_chunks = []
+                for i in range(0, node_tokens.size(0), chunk_size):
+                    tok_chunk = node_tokens[i:i+chunk_size]
+                    mask_chunk = node_mask[i:i+chunk_size]
+                    outputs = self.codebert(input_ids=tok_chunk, attention_mask=mask_chunk)
+                    sem_chunks.append(outputs.last_hidden_state[:, 0, :]) # [chunk, 768]
+                
+                h_sem_raw = torch.cat(sem_chunks, dim=0) # [min(N, 1000), 768]
+            
+            h_sem = self.semantic_proj(h_sem_raw)     # [min(N, 1000), embed_dim]
+            
+            # If we capped, pad with zeros for the remaining nodes
+            if num_nodes > MAX_SEM_NODES:
+                padding = torch.zeros((num_nodes - MAX_SEM_NODES, h_sem.size(1)), device=h_sem.device)
+                h_sem = torch.cat([h_sem, padding], dim=0)
+                
+            h0 = h_struct + h_sem                  # Fuse
+        else:
+            h0 = h_struct
 
         h1 = self.conv1(h0, edge_index)     # [N, hidden_dim]
         h1 = F.relu(h1)

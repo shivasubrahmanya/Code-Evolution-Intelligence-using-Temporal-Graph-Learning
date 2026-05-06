@@ -80,9 +80,12 @@ def encode_sequence_batch(
                 graphs.append(item)
         
         pyg_batch = Batch.from_data_list(graphs).to(DEVICE)
+        node_tokens = getattr(pyg_batch, "node_tokens", None)
+        node_mask   = getattr(pyg_batch, "node_mask", None)
 
         with torch.no_grad() if not gnn.training else torch.enable_grad():
-            emb = gnn(pyg_batch.x, pyg_batch.edge_index, pyg_batch.batch)  # [B, D]
+            emb = gnn(pyg_batch.x, pyg_batch.edge_index, pyg_batch.batch,
+                      node_tokens=node_tokens, node_mask=node_mask)  # [B, D]
 
         all_embeddings.append(emb)   # W × [B, D]
 
@@ -321,11 +324,11 @@ def run(args) -> None:
     else:
         pos_weight = torch.tensor([3.0]).to(DEVICE) # Fallback
 
-    loss_change = nn.CrossEntropyLoss()  # Unweighted because of Sampler
+    loss_change = nn.CrossEntropyLoss(label_smoothing=0.1)  # Added smoothing to prevent overfitting
     loss_bug    = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     # -- Optimizer & Scheduler -------------------------
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # -- Training loop --------------------------------
@@ -382,7 +385,7 @@ def parse_args():
     p.add_argument("--embed-dim",   type=int,   default=256)
     p.add_argument("--num-heads",   type=int,   default=8)
     p.add_argument("--num-layers",  type=int,   default=2)
-    p.add_argument("--dropout",     type=float, default=0.2)
+    p.add_argument("--dropout",     type=float, default=0.4)
     p.add_argument("--output-dir",  default=str(ROOT / "outputs" / "checkpoints"))
     p.add_argument("--force-json",  action="store_true", help="Force slow JSON loading")
     return p.parse_args()

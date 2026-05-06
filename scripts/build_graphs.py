@@ -105,10 +105,14 @@ def ast_to_graph(source: str) -> Optional[dict]:
 
     nodes: list[int] = []
     edges: list[list[int]] = []
+    node_texts: list[str] = []
 
     # BFS traversal to assign node indices
     queue  = [(root, -1)]   # (node, parent_index)
     index  = 0
+
+    # Get source as bytes for accurate slicing
+    source_bytes = source.encode("utf-8")
 
     while queue:
         current, parent_idx = queue.pop(0)
@@ -116,6 +120,10 @@ def ast_to_graph(source: str) -> Optional[dict]:
         index += 1
 
         nodes.append(VOCAB.encode(current.type))
+        
+        # Extract the actual code text for this node
+        snippet = source_bytes[current.start_byte:current.end_byte].decode("utf-8", errors="replace")
+        node_texts.append(snippet[:512]) # Cap length to avoid massive strings
 
         if parent_idx >= 0:
             edges.append([parent_idx, current_idx])
@@ -124,10 +132,11 @@ def ast_to_graph(source: str) -> Optional[dict]:
             queue.append((child, current_idx))
 
     return {
-        "nodes":     nodes,
-        "edges":     edges,
-        "num_nodes": len(nodes),
-        "num_edges": len(edges),
+        "nodes":      nodes,
+        "node_texts": node_texts,
+        "edges":      edges,
+        "num_nodes":  len(nodes),
+        "num_edges":  len(edges),
     }
 
 
